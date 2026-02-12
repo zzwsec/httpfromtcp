@@ -26,7 +26,9 @@ func getLinesChannel(f io.ReadCloser) <-chan string {
 	go func() {
 		defer func() {
 			err := f.Close()
-			fmt.Println(err)
+			if err != nil {
+				fmt.Println(err)
+			}
 		}()
 		defer close(lines)
 		currentLine := ""
