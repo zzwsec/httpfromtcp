@@ -93,7 +93,7 @@ func parseRequestLine(dat []byte, rl *RequestLine) (int, error) {
 	}
 	rl.Method = method
 	rl.RequestTarget = target
-	rl.HttpVersion = httpVersion
+	rl.HttpVersion = version
 
 	return len(result + "\r\n"), nil
 }
@@ -107,6 +107,7 @@ func (r *Request) parse(data []byte) (int, error) {
 		}
 		if n > 0 {
 			r.RequestStat = done
+			return n, nil
 		}
 		return 0, nil
 	case done:
