@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"strings"
+
+	"github.com/zzwsec/httpfromtcp/internal/request"
 )
 
 const port = ":42069"
@@ -35,66 +33,19 @@ func main() {
 }
 
 func handleConnection(conn net.Conn) {
+	defer conn.Close()
+
 	fmt.Println("Accepted connection from", conn.RemoteAddr())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	linesChan := getLinesChannel(ctx, conn)
-	for line := range linesChan {
-		fmt.Println(line)
+	res, err := request.RequestFromReader(conn)
+	if err != nil {
+		fmt.Println("Error parsing request from", conn.RemoteAddr(), ":", err)
+		return
 	}
+
+	fmt.Printf("Request line:\n- Method: %s\n- Target: %s\n- Version: %s\n",
+		res.RequestLine.Method,
+		res.RequestLine.RequestTarget,
+		res.RequestLine.HttpVersion)
+
 	fmt.Println("Connection to ", conn.RemoteAddr(), "closed")
-}
-
-func getLinesChannel(ctx context.Context, f io.ReadCloser) <-chan string {
-	lines := make(chan string)
-	go func() {
-		defer func() {
-			err := f.Close()
-			if err != nil {
-				fmt.Println(err)
-			}
-			close(lines)
-		}()
-
-		currentLine := ""
-
-		for {
-			dat := make([]byte, 8)
-			n, err := f.Read(dat)
-			if err != nil {
-				if currentLine != "" {
-					select {
-					case lines <- currentLine:
-					case <-ctx.Done():
-					}
-				}
-				if !errors.Is(err, io.EOF) {
-					fmt.Printf("read error: %s\n", err.Error())
-				}
-				return
-			}
-
-			parts := strings.Split(string(dat[:n]), "\n")
-			for i := 0; i < len(parts)-1; i++ {
-				fullLine := currentLine + parts[i]
-
-				select {
-				case lines <- fullLine:
-					currentLine = ""
-				case <-ctx.Done():
-					return
-				}
-			}
-			currentLine += parts[len(parts)-1]
-
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-		}
-	}()
-	return lines
 }
