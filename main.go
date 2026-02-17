@@ -24,12 +24,7 @@ func main() {
 func getLinesChannel(f io.ReadCloser) <-chan string {
 	lines := make(chan string)
 	go func() {
-		defer func() {
-			err := f.Close()
-			if err != nil {
-				fmt.Println(err)
-			}
-		}()
+		defer f.Close()
 		defer close(lines)
 		currentLine := ""
 
