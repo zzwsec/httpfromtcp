@@ -1,15 +1,11 @@
 package request
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"io"
-	"strings"
 )
-
-type Request struct {
-	RequestLine RequestLine
-	RequestStat RequestStat
-}
 
 type RequestStat int
 
@@ -17,6 +13,13 @@ const (
 	initialized RequestStat = iota
 	done
 )
+
+const defaultBufferSize = 8
+
+type Request struct {
+	RequestLine RequestLine
+	RequestStat RequestStat
+}
 
 type RequestLine struct {
 	HttpVersion   string
@@ -26,76 +29,50 @@ type RequestLine struct {
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
 	req := &Request{RequestStat: initialized}
-	buffer := make([]byte, 0, 8) // 主缓冲区
-	tmp := make([]byte, 8)       // 临时缓冲区
+
+	// 初始化固定大小缓冲区
+	buf := make([]byte, defaultBufferSize)
+	readToIndex := 0
 
 	for req.RequestStat != done {
-		n, err := reader.Read(tmp)
-		if n > 0 {
-			// 1. 数据进入：追加到主缓冲区
-			buffer = append(buffer, tmp[:n]...)
+		// 1. 缓冲区自动扩容 (如果已满)
+		if readToIndex == len(buf) {
+			newBuf := make([]byte, len(buf)*2)
+			copy(newBuf, buf)
+			buf = newBuf
+		}
 
-			// 2. 尝试解析：消耗主缓冲区的数据
-			consumed, err := req.parse(buffer)
-			if err != nil {
-				return nil, err
+		// 2. 从 Reader 读取数据，注意读取位置是从已存数据的末尾开始
+		n, err := reader.Read(buf[readToIndex:])
+		if n > 0 {
+			readToIndex += n
+
+			// 3. 尝试解析当前缓冲区中的所有有效数据
+			consumed, parseErr := req.parse(buf[:readToIndex])
+			if parseErr != nil {
+				return nil, parseErr
 			}
 
-			// 3. 数据移出：删掉已经消耗的部分（进出移动）
+			// 4. 原地移动数据 (In-place buffer shift)
+			// 如果解析了部分数据，将剩余未解析的数据移到最前面
 			if consumed > 0 {
-				buffer = buffer[consumed:]
+				copy(buf, buf[consumed:readToIndex])
+				readToIndex -= consumed
 			}
 		}
 
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				// 只有在解析完成时 EOF 才是正常的
+				if req.RequestStat != done {
+					return nil, errors.New("incomplete request: connection closed")
+				}
 				break
 			}
 			return nil, err
 		}
 	}
 	return req, nil
-}
-
-func parseRequestLine(dat []byte, rl *RequestLine) (int, error) {
-	s := string(dat)
-	exists := strings.Contains(s, "\r\n")
-	if !exists {
-		return 0, nil
-	}
-
-	result := strings.Split(s, "\r\n")[0]
-	parts := strings.Fields(result)
-
-	if len(parts) != 3 {
-		return 0, errors.New("invalid request line: wrong number of parts")
-	}
-
-	method := parts[0]
-	target := parts[1]
-	httpVersion := parts[2]
-
-	if method != strings.ToUpper(method) || len(method) == 0 {
-		return 0, errors.New("invalid method")
-	}
-
-	if !strings.HasPrefix(target, "/") {
-		return 0, errors.New("invalid http target format")
-	}
-
-	if !strings.HasPrefix(httpVersion, "HTTP/") {
-		return 0, errors.New("invalid http version format")
-	}
-
-	version := strings.TrimPrefix(httpVersion, "HTTP/")
-	if version != "1.1" {
-		return 0, errors.New("unsupported http version")
-	}
-	rl.Method = method
-	rl.RequestTarget = target
-	rl.HttpVersion = version
-
-	return len(result + "\r\n"), nil
 }
 
 func (r *Request) parse(data []byte) (int, error) {
@@ -111,8 +88,47 @@ func (r *Request) parse(data []byte) (int, error) {
 		}
 		return 0, nil
 	case done:
-		return 0, nil
+		// 已经 done 了就不该再传数据进来
+		return 0, errors.New("error: trying to parse data in a done state")
 	default:
-		return 0, errors.New("unknown stat")
+		return 0, fmt.Errorf("error: unknown state %v", r.RequestStat)
 	}
+}
+
+func parseRequestLine(dat []byte, rl *RequestLine) (int, error) {
+	// 使用 bytes 库直接操作字节流，避免 string() 产生内存分配
+	crlf := []byte("\r\n")
+	idx := bytes.Index(dat, crlf)
+	if idx == -1 {
+		return 0, nil // 数据不完整，需要更多
+	}
+
+	line := dat[:idx]
+	// 按照空白字符分割: [GET, /, HTTP/1.1]
+	parts := bytes.Fields(line)
+	if len(parts) != 3 {
+		return 0, errors.New("invalid request line: wrong number of parts")
+	}
+
+	// 转换逻辑
+	method := string(parts[0])
+	target := string(parts[1])
+	// versionRaw := string(parts[2])
+
+	// 验证逻辑
+	if !bytes.Equal(parts[0], bytes.ToUpper(parts[0])) {
+		return 0, errors.New("invalid method")
+	}
+	if !bytes.HasPrefix(parts[1], []byte("/")) {
+		return 0, errors.New("invalid target")
+	}
+	if !bytes.HasPrefix(parts[2], []byte("HTTP/")) {
+		return 0, errors.New("invalid version format")
+	}
+
+	rl.Method = method
+	rl.RequestTarget = target
+	rl.HttpVersion = string(bytes.TrimPrefix(parts[2], []byte("HTTP/")))
+
+	return idx + 2, nil // 消耗的长度 = 行长 + \r\n
 }
